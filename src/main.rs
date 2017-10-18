@@ -2,17 +2,21 @@
 extern crate serde_derive;
 
 extern crate serde;
-extern crate serde_json;
+extern crate bincode;
 
 extern crate chrono;
 extern crate crypto;
 
+use bincode::{serialize, deserialize, Infinite};
 use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 
 fn main() {
     println!("Hello, world!");
+    let last_proof = 1;
+    let valid = Blockchain::proof_of_work(last_proof);
+    println!("Valid proof : {}", valid);
 }
 
 struct Blockchain {
@@ -22,8 +26,20 @@ struct Blockchain {
 
 impl Blockchain {
 
-    fn new_block(&mut self, proof: u64) -> Block {
-        let previous_hash = Blockchain::hash(self.last_block());
+    fn new() -> Blockchain {
+        let mut blockchain = Blockchain {
+            chain: Vec::new(),
+            pending_transactions: Vec::new()
+        };
+
+        // Create Genesis block
+        blockchain.new_block(100, Some("1".to_owned()));
+
+        blockchain
+    }
+
+    fn new_block(&mut self, proof: u64, previous_hash: Option<String>) -> Block {
+        let previous_hash = previous_hash.unwrap_or_else(|| Blockchain::hash(self.last_block()));
         let block = Block {
             index: (self.chain.len() as u32) + 1,
             timestamp: Utc::now().timestamp(),
@@ -49,7 +65,7 @@ impl Blockchain {
         return self.chain.last_mut().unwrap();
     }
 
-    fn proof_of_work(&self, last_proof: u64) -> u64 {
+    fn proof_of_work(last_proof: u64) -> u64 {
         let mut proof = 0;
         while !(Blockchain::valid_proof(last_proof, proof)) {
             proof += 1;
@@ -58,21 +74,21 @@ impl Blockchain {
     }
 
     fn valid_proof(last_proof: u64, proof: u64) -> bool {
-        let guess = format!("{}{}", last_proof, proof);
+        let guess = format!("{}", last_proof * proof);
         let mut sha = Sha256::new();
         sha.input_str(&guess);
         return sha.result_str().ends_with("0000");
     }
 
+    // TODO : Consider changing signature to &static str
     fn hash(block: &Block) -> String {
-        let block_json = serde_json::to_string(block).unwrap();
+        let ser_block = serialize(block, Infinite).unwrap();
 
         // Create Sha256 of JSON serialized block
         let mut sha = Sha256::new();
-        sha.input_str(&block_json);
+        sha.input(&ser_block);
         return sha.result_str();
     }
-
 
 }
 
@@ -102,4 +118,46 @@ impl Transaction {
     pub fn new(sender: String, recipient: String, amount: u64) -> Transaction {
         Transaction { sender, recipient, amount }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn genesis_blockchain() {
+        let blockchain = Blockchain::new();
+
+        assert_eq!(blockchain.chain.len() as u32, 1);
+        assert_eq!(blockchain.pending_transactions.len() as u32, 0);
+    }
+
+    #[test]
+    fn hash_blockchain_identity() {
+        let mut block = Block {
+            index: 1,
+            timestamp: Utc::now().timestamp(),
+            transactions: Vec::new(),
+            proof: 100,
+            previous_hash: "1".to_owned()
+        };
+
+        let h1 = Blockchain::hash(&block);
+
+        block.append_transaction(Transaction::new("alice".to_owned(), "bob".to_owned(), 10));
+
+        let h2 = Blockchain::hash(&block);
+
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn validate_proof() {
+        let last_proof = 1;
+        let valid = 31214; // from: Blockchain::proof_of_work(last_proof);
+
+        assert!(Blockchain::valid_proof(last_proof, valid));
+        assert!(!Blockchain::valid_proof(last_proof, valid-1));
+    }
+
 }
