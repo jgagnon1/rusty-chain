@@ -1,9 +1,9 @@
 #![feature(plugin)]
 #![plugin(rocket_codegen)]
 extern crate rocket;
+extern crate rocket_contrib;
 
-#[macro_use]
-extern crate serde_derive;
+#[macro_use] extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
 
@@ -12,30 +12,53 @@ extern crate bincode;
 extern crate chrono;
 extern crate crypto;
 
-use bincode::{serialize, deserialize, Infinite};
+extern crate uuid;
+
+use bincode::{serialize, Infinite};
 use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
+use rocket::State;
+use rocket_contrib::Json;
+use uuid::Uuid;
+use std::sync::RwLock;
+
+struct Application {
+    node_identifier: String,
+    blockchain: RwLock<Blockchain>
+}
 
 fn main() {
-    rocket::ignite().mount("/", routes![chain, mine, new_transaction]).launch();
+    let node_id= Uuid::new_v4().hyphenated().to_string();
+
+    let app = Application {
+        node_identifier: node_id,
+        blockchain: RwLock::new(Blockchain::new())
+    };
+
+    rocket::ignite()
+        .mount("/", routes![chain, mine, new_transaction])
+        .manage(app)
+        .launch();
 }
 
 #[post("/mine")]
-fn mine() -> &'static str {
-    "Mining some block !"
+fn mine(state: State<Application>) -> String {
+    let n_block = state.blockchain.write().unwrap().mine(state.node_identifier.as_ref());
+    serde_json::to_string(&n_block).unwrap()
 }
 
-#[post("/transaction")]
-fn new_transaction() -> &'static str {
+#[post("/transaction", format = "application/json", data = "<transaction>")]
+fn new_transaction(transaction: Json<Transaction>, state: State<Application>) -> &'static str {
+    let new_t: Transaction = transaction.into_inner();
+    state.blockchain.write().unwrap()
+        .new_transaction(new_t.sender, new_t.recipient, new_t.amount);
     "Adding new transaction to current block."
 }
 
-#[get("/chain")]
-fn chain() -> String {
-    // TODO : Use application blockchain
-    let mut blockchain = Blockchain::new();
-    serde_json::to_string(&blockchain.chain).unwrap()
+#[get("/chain", format = "application/json")]
+fn chain(state: State<Application>) -> String {
+    serde_json::to_string(&state.blockchain.read().unwrap().chain).unwrap()
 }
 
 struct Blockchain {
@@ -44,6 +67,9 @@ struct Blockchain {
 }
 
 impl Blockchain {
+
+    const ORIGIN_SENDER: &'static str = "0";
+
     fn new() -> Blockchain {
         let mut blockchain = Blockchain {
             chain: Vec::new(),
@@ -52,8 +78,17 @@ impl Blockchain {
 
         // Create Genesis block
         blockchain.new_block(100, Some("1".to_owned()));
-
         blockchain
+    }
+
+    fn mine(&mut self, node_uuid: &str) -> Block {
+        let last_proof = self.last_block().proof;
+        let proof = Blockchain::proof_of_work(last_proof);
+
+        // Pay the current node for mining
+        self.new_transaction(String::from(Blockchain::ORIGIN_SENDER),String::from(node_uuid), 1);
+
+        return self.new_block(proof, None)
     }
 
     fn new_block(&mut self, proof: u64, previous_hash: Option<String>) -> Block {
@@ -70,7 +105,7 @@ impl Blockchain {
         self.pending_transactions.clear();
         self.chain.push(block.clone());
 
-        return block;
+        block
     }
 
     fn new_transaction(&mut self, sender: String, recipient: String, amount: u64) -> u32 {
@@ -88,7 +123,7 @@ impl Blockchain {
         while !(Blockchain::valid_proof(last_proof, proof)) {
             proof += 1;
         }
-        return proof;
+        proof
     }
 
     fn valid_proof(last_proof: u64, proof: u64) -> bool {
