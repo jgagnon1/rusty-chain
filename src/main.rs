@@ -1,11 +1,12 @@
 #![feature(plugin)]
 #![plugin(rocket_codegen)]
 extern crate rocket;
-#[macro_use] extern crate rocket_contrib;
+#[macro_use]
+extern crate rocket_contrib;
 
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
 extern crate serde;
-extern crate serde_json;
 
 extern crate bincode;
 
@@ -19,8 +20,10 @@ use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use rocket::State;
+use rocket::response::status;
 use rocket_contrib::{Json, Value};
 use uuid::Uuid;
+use std::collections::HashSet;
 use std::sync::RwLock;
 
 struct Application {
@@ -29,7 +32,7 @@ struct Application {
 }
 
 fn main() {
-    let node_id= Uuid::new_v4().hyphenated().to_string();
+    let node_id = Uuid::new_v4().hyphenated().to_string();
 
     let app = Application {
         node_identifier: node_id,
@@ -37,50 +40,69 @@ fn main() {
     };
 
     rocket::ignite()
-        .mount("/", routes![chain, node_info, mine, new_transaction])
+        .mount("/", routes![chain, node_info, node_register, mine, new_transaction])
         .manage(app)
         .launch();
 }
 
-#[get("/node/info")]
+#[post("/node/register", format = "application/json", data = "<node>")]
+fn node_register(state: State<Application>, node: Json<Node>) -> status::Created<Json<Value>> {
+    let n_node = node.into_inner();
+    let idx = state.blockchain.write().unwrap().add_node(n_node);
+    status::Created(
+        format!("/node/{}", idx),
+        Some(Json(json!({"message": format!("Added new node #{}.", idx)})))
+    )
+}
+
+#[get("/node/info", format = "application/json")]
 fn node_info(state: State<Application>) -> Json<Value> {
     Json(json!({
         "id": state.node_identifier
     }))
 }
 
-#[post("/mine")]
-fn mine(state: State<Application>) -> String {
-    let n_block = state.blockchain.write().unwrap().mine(state.node_identifier.as_ref());
-    serde_json::to_string(&n_block).unwrap()
+#[post("/mine", format = "application/json")]
+fn mine(state: State<Application>) -> Json<Block> {
+    let n_block = state.blockchain.write()
+        .unwrap().mine(state.node_identifier.as_ref());
+    Json(n_block)
 }
 
 #[post("/transaction", format = "application/json", data = "<transaction>")]
-fn new_transaction(transaction: Json<Transaction>, state: State<Application>) -> &'static str {
+fn new_transaction(state: State<Application>, transaction: Json<Transaction>) -> status::Created<Json<Value>> {
     let new_t: Transaction = transaction.into_inner();
-    state.blockchain.write().unwrap()
+    let idx = state.blockchain.write().unwrap()
         .new_transaction(new_t.sender, new_t.recipient, new_t.amount);
-    "Adding new transaction to current block."
+
+    status::Created(
+        "/chain".to_owned(),
+        Some(Json(json!({"message": format!("Added new transaction to block #{}.", idx)})))
+    )
 }
 
 #[get("/chain", format = "application/json")]
-fn chain(state: State<Application>) -> String {
-    serde_json::to_string(&state.blockchain.read().unwrap().chain).unwrap()
+fn chain(state: State<Application>) -> Json<Vec<Block>> {
+    // FIXME : Clone should not be needed here ?
+    let chain = state.blockchain.read()
+        .map(|b| b.chain.clone()).unwrap();
+    Json(chain)
 }
 
 struct Blockchain {
     chain: Vec<Block>,
-    pending_transactions: Vec<Transaction>
+    pending_transactions: Vec<Transaction>,
+    nodes: HashSet<Node>
 }
 
 impl Blockchain {
-
     const ORIGIN_SENDER: &'static str = "0";
 
     fn new() -> Blockchain {
         let mut blockchain = Blockchain {
             chain: Vec::new(),
-            pending_transactions: Vec::new()
+            pending_transactions: Vec::new(),
+            nodes: HashSet::new()
         };
 
         // Create Genesis block
@@ -93,7 +115,7 @@ impl Blockchain {
         let proof = Blockchain::proof_of_work(last_proof);
 
         // Pay the current node for mining
-        self.new_transaction(String::from(Blockchain::ORIGIN_SENDER),String::from(node_uuid), 1);
+        self.new_transaction(String::from(Blockchain::ORIGIN_SENDER), String::from(node_uuid), 1);
 
         return self.new_block(proof, None);
     }
@@ -123,6 +145,11 @@ impl Blockchain {
 
     fn last_block(&mut self) -> &mut Block {
         self.chain.last_mut().expect("Chain is empty of blocks.")
+    }
+
+    fn add_node(&mut self, node: Node) -> u32 {
+        self.nodes.insert(node);
+        return self.nodes.len() as u32;
     }
 
     fn proof_of_work(last_proof: u64) -> u64 {
@@ -177,6 +204,11 @@ impl Transaction {
     pub fn new(sender: String, recipient: String, amount: u64) -> Transaction {
         Transaction { sender, recipient, amount }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
+struct Node {
+    address: String
 }
 
 #[cfg(test)]
