@@ -1,7 +1,7 @@
 #![feature(plugin)]
 #![plugin(rocket_codegen)]
 extern crate rocket;
-extern crate rocket_contrib;
+#[macro_use] extern crate rocket_contrib;
 
 #[macro_use] extern crate serde_derive;
 extern crate serde;
@@ -19,7 +19,7 @@ use chrono::prelude::*;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use rocket::State;
-use rocket_contrib::Json;
+use rocket_contrib::{Json, Value};
 use uuid::Uuid;
 use std::sync::RwLock;
 
@@ -37,9 +37,16 @@ fn main() {
     };
 
     rocket::ignite()
-        .mount("/", routes![chain, mine, new_transaction])
+        .mount("/", routes![chain, node_info, mine, new_transaction])
         .manage(app)
         .launch();
+}
+
+#[get("/node/info")]
+fn node_info(state: State<Application>) -> Json<Value> {
+    Json(json!({
+        "id": state.node_identifier
+    }))
 }
 
 #[post("/mine")]
@@ -78,7 +85,7 @@ impl Blockchain {
 
         // Create Genesis block
         blockchain.new_block(100, Some("1".to_owned()));
-        blockchain
+        return blockchain;
     }
 
     fn mine(&mut self, node_uuid: &str) -> Block {
@@ -88,7 +95,7 @@ impl Blockchain {
         // Pay the current node for mining
         self.new_transaction(String::from(Blockchain::ORIGIN_SENDER),String::from(node_uuid), 1);
 
-        return self.new_block(proof, None)
+        return self.new_block(proof, None);
     }
 
     fn new_block(&mut self, proof: u64, previous_hash: Option<String>) -> Block {
@@ -105,7 +112,7 @@ impl Blockchain {
         self.pending_transactions.clear();
         self.chain.push(block.clone());
 
-        block
+        return block;
     }
 
     fn new_transaction(&mut self, sender: String, recipient: String, amount: u64) -> u32 {
@@ -115,7 +122,7 @@ impl Blockchain {
     }
 
     fn last_block(&mut self) -> &mut Block {
-        return self.chain.last_mut().unwrap();
+        self.chain.last_mut().expect("Chain is empty of blocks.")
     }
 
     fn proof_of_work(last_proof: u64) -> u64 {
