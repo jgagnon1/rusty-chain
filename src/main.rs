@@ -1,7 +1,12 @@
+#![feature(plugin)]
+#![plugin(rocket_codegen)]
+extern crate rocket;
+
 #[macro_use]
 extern crate serde_derive;
-
 extern crate serde;
+extern crate serde_json;
+
 extern crate bincode;
 
 extern crate chrono;
@@ -13,10 +18,24 @@ use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 
 fn main() {
-    println!("Hello, world!");
-    let last_proof = 1;
-    let valid = Blockchain::proof_of_work(last_proof);
-    println!("Valid proof : {}", valid);
+    rocket::ignite().mount("/", routes![chain, mine, new_transaction]).launch();
+}
+
+#[post("/mine")]
+fn mine() -> &'static str {
+    "Mining some block !"
+}
+
+#[post("/transaction")]
+fn new_transaction() -> &'static str {
+    "Adding new transaction to current block."
+}
+
+#[get("/chain")]
+fn chain() -> String {
+    // TODO : Use application blockchain
+    let mut blockchain = Blockchain::new();
+    serde_json::to_string(&blockchain.chain).unwrap()
 }
 
 struct Blockchain {
@@ -25,7 +44,6 @@ struct Blockchain {
 }
 
 impl Blockchain {
-
     fn new() -> Blockchain {
         let mut blockchain = Blockchain {
             chain: Vec::new(),
@@ -89,7 +107,6 @@ impl Blockchain {
         sha.input(&ser_block);
         return sha.result_str();
     }
-
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -133,7 +150,20 @@ mod tests {
     }
 
     #[test]
-    fn hash_blockchain_identity() {
+    fn hash_blockchain_determinism() {
+        let block = Block {
+            index: 1,
+            timestamp: Utc::now().timestamp(),
+            transactions: Vec::new(),
+            proof: 100,
+            previous_hash: "1".to_owned()
+        };
+
+        assert_eq!(Blockchain::hash(&block), Blockchain::hash(&block));
+    }
+
+    #[test]
+    fn hash_blockchain_variability() {
         let mut block = Block {
             index: 1,
             timestamp: Utc::now().timestamp(),
@@ -157,7 +187,6 @@ mod tests {
         let valid = 31214; // from: Blockchain::proof_of_work(last_proof);
 
         assert!(Blockchain::valid_proof(last_proof, valid));
-        assert!(!Blockchain::valid_proof(last_proof, valid-1));
+        assert!(!Blockchain::valid_proof(last_proof, valid - 1));
     }
-
 }
