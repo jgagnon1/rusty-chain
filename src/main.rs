@@ -3,16 +3,14 @@
 extern crate rocket;
 #[macro_use]
 extern crate rocket_contrib;
-
+extern crate reqwest;
+extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate serde;
 
 extern crate bincode;
-
 extern crate chrono;
 extern crate crypto;
-
 extern crate uuid;
 
 use bincode::{serialize, Infinite};
@@ -22,13 +20,15 @@ use crypto::sha2::Sha256;
 use rocket::State;
 use rocket::response::status;
 use rocket_contrib::{Json, Value};
+use reqwest::{Client, Error};
 use uuid::Uuid;
+
 use std::collections::HashSet;
 use std::sync::RwLock;
 
 struct Application {
     node_identifier: String,
-    blockchain: RwLock<Blockchain>
+    blockchain: RwLock<Blockchain>,
 }
 
 fn main() {
@@ -36,11 +36,14 @@ fn main() {
 
     let app = Application {
         node_identifier: node_id,
-        blockchain: RwLock::new(Blockchain::new())
+        blockchain: RwLock::new(Blockchain::new()),
     };
 
     rocket::ignite()
-        .mount("/", routes![chain, node_info, node_register, mine, new_transaction])
+        .mount(
+            "/",
+            routes![chain, node_info, node_consensus, node_register, mine, new_transaction],
+        )
         .manage(app)
         .launch();
 }
@@ -51,7 +54,9 @@ fn node_register(state: State<Application>, node: Json<Node>) -> status::Created
     let idx = state.blockchain.write().unwrap().add_node(n_node);
     status::Created(
         format!("/node/{}", idx),
-        Some(Json(json!({"message": format!("Added new node #{}.", idx)})))
+        Some(Json(json!({
+            "message": format!("Added new node #{}.", idx)
+        }))),
     )
 }
 
@@ -60,6 +65,24 @@ fn node_info(state: State<Application>) -> Json<Value> {
     Json(json!({
         "id": state.node_identifier
     }))
+}
+
+#[post("/node/resolve", format = "application/json")]
+fn node_consensus(state: State<Application>) -> Json<Value> {
+    let consensus = state.blockchain.write().unwrap().resolve_conflicts();
+    let local_chain = &state.blockchain.read().unwrap().chain;
+
+    if consensus {
+      Json(json!({
+        "message": "Local chain has been replaced.",
+        "chain": local_chain
+      }))
+    } else {
+     Json(json!({
+        "message": "Local chain is authoritative.",
+        "chain" : local_chain
+     }))
+    }
 }
 
 #[post("/mine", format = "application/json")]
@@ -99,17 +122,21 @@ fn chain(state: State<Application>) -> Json<Vec<Block>> {
     Json(chain)
 }
 
+// TODO : Move client and nodes into a NodeManager Struct/Impl.
 struct Blockchain {
+    client: Client,
     chain: Vec<Block>,
     pending_transactions: Vec<Transaction>,
     nodes: HashSet<Node>,
 }
 
 impl Blockchain {
+
     const ORIGIN_SENDER: &'static str = "0";
 
     fn new() -> Blockchain {
         let mut blockchain = Blockchain {
+            client: Client::new(),
             chain: Vec::new(),
             pending_transactions: Vec::new(),
             nodes: HashSet::new(),
@@ -167,10 +194,29 @@ impl Blockchain {
     }
 
     fn resolve_conflicts(&mut self) -> bool {
-        // Get and verify the chain for all other nodes
-        let chains = self.nodes.iter().map(|node| {});
+        // Get and verify the chain from all other nodes
+        let new_chain = self
+            .nodes
+            .iter()
+            .map(|node| Blockchain::get_node_chain(&self.client, &node))
+            .filter_map(Result::ok)
+            .find(|chain| {
+                chain.len() > self.chain.len() &&
+                    Blockchain::validate_chain(&chain)
+            });
 
-        true
+        if let Some(c) = new_chain {
+            self.chain = c;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get_node_chain(client: &Client, node: &Node) -> Result<Vec<Block>, Error> {
+        let chain_uri = format!("http://{}/chain", node.address);
+        let res = client.get(&chain_uri).send()?.json()?;
+        Ok(res)
     }
 
     fn proof_of_work(last_proof: u64) -> u64 {
