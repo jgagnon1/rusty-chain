@@ -31,6 +31,8 @@ struct Application {
     blockchain: RwLock<Blockchain>,
 }
 
+type Chain = Vec<Block>;
+
 fn main() {
     let node_id = Uuid::new_v4().hyphenated().to_string();
 
@@ -48,6 +50,13 @@ fn main() {
         .launch();
 }
 
+#[get("/node/info", format = "application/json")]
+fn node_info(state: State<Application>) -> Json<Value> {
+    Json(json!({
+        "id": state.node_identifier
+    }))
+}
+
 #[post("/node/register", format = "application/json", data = "<node>")]
 fn node_register(state: State<Application>, node: Json<Node>) -> status::Created<Json<Value>> {
     let n_node = node.into_inner();
@@ -58,13 +67,6 @@ fn node_register(state: State<Application>, node: Json<Node>) -> status::Created
             "message": format!("Added new node #{}.", idx)
         }))),
     )
-}
-
-#[get("/node/info", format = "application/json")]
-fn node_info(state: State<Application>) -> Json<Value> {
-    Json(json!({
-        "id": state.node_identifier
-    }))
 }
 
 #[post("/node/resolve", format = "application/json")]
@@ -116,16 +118,16 @@ fn new_transaction(
 }
 
 #[get("/chain", format = "application/json")]
-fn chain(state: State<Application>) -> Json<Vec<Block>> {
-    // FIXME : Clone should not be needed here ?
-    let chain = state.blockchain.read().map(|b| b.chain.clone()).unwrap();
+fn chain(state: State<Application>) -> Json<Chain> {
+    // FIXME : Clone should not be needed here.
+    let chain = state.blockchain.read().unwrap().chain.clone();
     Json(chain)
 }
 
 // TODO : Move client and nodes into a NodeManager Struct/Impl.
 struct Blockchain {
     client: Client,
-    chain: Vec<Block>,
+    chain: Chain,
     pending_transactions: Vec<Transaction>,
     nodes: HashSet<Node>,
 }
