@@ -64,35 +64,45 @@ fn node_info(state: State<Application>) -> Json<Value> {
 
 #[post("/mine", format = "application/json")]
 fn mine(state: State<Application>) -> Json<Block> {
-    let n_block = state.blockchain.write()
-        .unwrap().mine(state.node_identifier.as_ref());
+    let n_block = state
+        .blockchain
+        .write()
+        .unwrap()
+        .mine(state.node_identifier.as_ref());
     Json(n_block)
 }
 
 #[post("/transaction", format = "application/json", data = "<transaction>")]
-fn new_transaction(state: State<Application>, transaction: Json<Transaction>) -> status::Created<Json<Value>> {
+fn new_transaction(
+    state: State<Application>,
+    transaction: Json<Transaction>,
+) -> status::Created<Json<Value>> {
     let new_t: Transaction = transaction.into_inner();
-    let idx = state.blockchain.write().unwrap()
-        .new_transaction(new_t.sender, new_t.recipient, new_t.amount);
+    let idx = state.blockchain.write().unwrap().new_transaction(
+        new_t.sender,
+        new_t.recipient,
+        new_t.amount,
+    );
 
     status::Created(
         "/chain".to_owned(),
-        Some(Json(json!({"message": format!("Added new transaction to block #{}.", idx)})))
+        Some(Json(json!({
+            "message": format!("Added new transaction to block #{}.", idx)
+        }))),
     )
 }
 
 #[get("/chain", format = "application/json")]
 fn chain(state: State<Application>) -> Json<Vec<Block>> {
     // FIXME : Clone should not be needed here ?
-    let chain = state.blockchain.read()
-        .map(|b| b.chain.clone()).unwrap();
+    let chain = state.blockchain.read().map(|b| b.chain.clone()).unwrap();
     Json(chain)
 }
 
 struct Blockchain {
     chain: Vec<Block>,
     pending_transactions: Vec<Transaction>,
-    nodes: HashSet<Node>
+    nodes: HashSet<Node>,
 }
 
 impl Blockchain {
@@ -102,7 +112,7 @@ impl Blockchain {
         let mut blockchain = Blockchain {
             chain: Vec::new(),
             pending_transactions: Vec::new(),
-            nodes: HashSet::new()
+            nodes: HashSet::new(),
         };
 
         // Create Genesis block
@@ -115,7 +125,11 @@ impl Blockchain {
         let proof = Blockchain::proof_of_work(last_proof);
 
         // Pay the current node for mining
-        self.new_transaction(String::from(Blockchain::ORIGIN_SENDER), String::from(node_uuid), 1);
+        self.new_transaction(
+            String::from(Blockchain::ORIGIN_SENDER),
+            String::from(node_uuid),
+            1,
+        );
 
         return self.new_block(proof, None);
     }
@@ -127,7 +141,7 @@ impl Blockchain {
             timestamp: Utc::now().timestamp(),
             transactions: self.pending_transactions.clone(),
             proof,
-            previous_hash
+            previous_hash,
         };
 
         // Clear transactions included in new block and push to chain
@@ -150,6 +164,13 @@ impl Blockchain {
     fn add_node(&mut self, node: Node) -> u32 {
         self.nodes.insert(node);
         return self.nodes.len() as u32;
+    }
+
+    fn resolve_conflicts(&mut self) -> bool {
+        // Get and verify the chain for all other nodes
+        let chains = self.nodes.iter().map(|node| {});
+
+        true
     }
 
     fn proof_of_work(last_proof: u64) -> u64 {
@@ -176,6 +197,13 @@ impl Blockchain {
         sha.input(&ser_block);
         return sha.result_str();
     }
+
+    fn validate_chain(chain: &Vec<Block>) -> bool {
+        chain.iter().zip(&chain[1..]).all(|(a, b)| -> bool {
+            Blockchain::hash(a) == b.previous_hash &&
+                Blockchain::valid_proof(b.proof, a.proof)
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -184,7 +212,7 @@ struct Block {
     timestamp: i64,
     transactions: Vec<Transaction>,
     proof: u64,
-    previous_hash: String
+    previous_hash: String,
 }
 
 impl Block {
@@ -197,18 +225,22 @@ impl Block {
 struct Transaction {
     sender: String,
     recipient: String,
-    amount: u64
+    amount: u64,
 }
 
 impl Transaction {
     pub fn new(sender: String, recipient: String, amount: u64) -> Transaction {
-        Transaction { sender, recipient, amount }
+        Transaction {
+            sender,
+            recipient,
+            amount,
+        }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
 struct Node {
-    address: String
+    address: String,
 }
 
 #[cfg(test)]
@@ -230,10 +262,12 @@ mod tests {
             timestamp: Utc::now().timestamp(),
             transactions: Vec::new(),
             proof: 100,
-            previous_hash: "1".to_owned()
+            previous_hash: "1".to_owned(),
         };
 
-        assert_eq!(Blockchain::hash(&block), Blockchain::hash(&block));
+        let block2 = block.clone();
+
+        assert_eq!(Blockchain::hash(&block), Blockchain::hash(&block2));
     }
 
     #[test]
@@ -243,7 +277,7 @@ mod tests {
             timestamp: Utc::now().timestamp(),
             transactions: Vec::new(),
             proof: 100,
-            previous_hash: "1".to_owned()
+            previous_hash: "1".to_owned(),
         };
 
         let h1 = Blockchain::hash(&block);
@@ -262,5 +296,28 @@ mod tests {
 
         assert!(Blockchain::valid_proof(last_proof, valid));
         assert!(!Blockchain::valid_proof(last_proof, valid - 1));
+    }
+
+    #[test]
+    fn validate_chain() {
+        let node_uuid = "1";
+
+        // Valid chain check
+        let mut blockchain = Blockchain::new();
+        blockchain.new_transaction("alice".to_owned(), "bob".to_owned(), 10);
+        blockchain.mine(node_uuid);
+        blockchain.new_transaction("alice".to_owned(), "bob".to_owned(), 15);
+        blockchain.mine(node_uuid);
+        assert!(Blockchain::validate_chain(&blockchain.chain), "Chain should be valid.");
+
+        // Invalid proof chain check
+        let mut invalid_proof_chain = blockchain.chain.to_vec();
+        invalid_proof_chain[1].proof = 0;
+        assert!(!Blockchain::validate_chain(&invalid_proof_chain), "Should not validate incorrect proof.");
+
+        // Invalid hash check
+        let mut invalid_hash_chain = blockchain.chain.to_vec();
+        invalid_hash_chain[1].previous_hash = "invalidhash".to_owned();
+        assert!(!Blockchain::validate_chain(&invalid_hash_chain), "Should not invalidate incorrect hash chain.")
     }
 }
