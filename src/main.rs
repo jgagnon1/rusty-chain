@@ -60,7 +60,7 @@ fn node_info(state: State<Application>) -> Json<Value> {
 #[post("/node/register", format = "application/json", data = "<node>")]
 fn node_register(state: State<Application>, node: Json<Node>) -> status::Created<Json<Value>> {
     let n_node = node.into_inner();
-    let idx = state.blockchain.write().unwrap().add_node(n_node);
+    let idx = state.blockchain.write().unwrap().node_manager.add_node(n_node);
     status::Created(
         format!("/node/{}", idx),
         Some(Json(json!({
@@ -80,10 +80,10 @@ fn node_consensus(state: State<Application>) -> Json<Value> {
         "chain": local_chain
       }))
     } else {
-     Json(json!({
+      Json(json!({
         "message": "Local chain is authoritative.",
         "chain" : local_chain
-     }))
+      }))
     }
 }
 
@@ -124,24 +124,56 @@ fn chain(state: State<Application>) -> Json<Chain> {
     Json(chain)
 }
 
-// TODO : Move client and nodes into a NodeManager Struct/Impl.
-struct Blockchain {
+struct NodeManager {
     client: Client,
-    chain: Chain,
-    pending_transactions: Vec<Transaction>,
     nodes: HashSet<Node>,
 }
 
-impl Blockchain {
+impl NodeManager {
+    fn new() -> NodeManager {
+        NodeManager {
+            client: Client::new(),
+            nodes: HashSet::new(),
+        }
+    }
 
+    fn add_node(&mut self, node: Node) -> u32 {
+        self.nodes.insert(node);
+        return self.nodes.len() as u32;
+    }
+
+    fn get_chains(&self) -> Vec<Chain> {
+        let chains = self.nodes
+            .iter()
+            .map(|node| self.get_node_chain(node))
+            .filter_map(Result::ok)
+            .collect();
+
+        chains
+    }
+
+    fn get_node_chain(&self, node: &Node) -> Result<Chain, Error> {
+        let chain_uri = format!("http://{}/chain", node.address);
+        let res = self.client.get(&chain_uri).send()?.json()?;
+        Ok(res)
+    }
+}
+
+// TODO : Move client and nodes into a NodeManager Struct/Impl.
+struct Blockchain {
+    chain: Chain,
+    pending_transactions: Vec<Transaction>,
+    node_manager: NodeManager,
+}
+
+impl Blockchain {
     const ORIGIN_SENDER: &'static str = "0";
 
     fn new() -> Blockchain {
         let mut blockchain = Blockchain {
-            client: Client::new(),
             chain: Vec::new(),
             pending_transactions: Vec::new(),
-            nodes: HashSet::new(),
+            node_manager: NodeManager::new(),
         };
 
         // Create Genesis block
@@ -190,35 +222,22 @@ impl Blockchain {
         self.chain.last_mut().expect("Chain is empty of blocks.")
     }
 
-    fn add_node(&mut self, node: Node) -> u32 {
-        self.nodes.insert(node);
-        return self.nodes.len() as u32;
-    }
-
     fn resolve_conflicts(&mut self) -> bool {
         // Get and verify the chain from all other nodes
-        let new_chain = self
-            .nodes
-            .iter()
-            .map(|node| Blockchain::get_node_chain(&self.client, &node))
-            .filter_map(Result::ok)
+        let new_chain = self.node_manager
+            .get_chains()
+            .into_iter()
             .find(|chain| {
                 chain.len() > self.chain.len() &&
                     Blockchain::validate_chain(&chain)
             });
 
         if let Some(c) = new_chain {
-            self.chain = c;
+            self.chain = c.to_owned();
             true
         } else {
             false
         }
-    }
-
-    fn get_node_chain(client: &Client, node: &Node) -> Result<Vec<Block>, Error> {
-        let chain_uri = format!("http://{}/chain", node.address);
-        let res = client.get(&chain_uri).send()?.json()?;
-        Ok(res)
     }
 
     fn proof_of_work(last_proof: u64) -> u64 {
