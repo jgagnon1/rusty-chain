@@ -3,7 +3,7 @@ use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use chrono::prelude::*;
 
-use core::nodemanager::NodeManager;
+use core::nodemanager::P2PNodeManager;
 
 pub type Chain = Vec<Block>;
 
@@ -14,12 +14,6 @@ pub struct Block {
     transactions: Vec<Transaction>,
     proof: u64,
     previous_hash: String,
-}
-
-impl Block {
-    fn append_transaction(&mut self, txn: Transaction) {
-        self.transactions.push(txn);
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -41,22 +35,23 @@ impl Transaction {
 
 pub struct Blockchain {
     pub chain: Chain,
-    pub node_manager: NodeManager,
+    pub node_manager: P2PNodeManager,
     pending_transactions: Vec<Transaction>,
 }
 
 impl Blockchain {
     const ORIGIN_SENDER: &'static str = "0";
+    const ORIGIN_HASH: &'static str = "1";
 
-    pub fn new() -> Blockchain {
+    pub fn new(node_manager: P2PNodeManager) -> Blockchain {
         let mut blockchain = Blockchain {
             chain: Vec::new(),
             pending_transactions: Vec::new(),
-            node_manager: NodeManager::new(),
+            node_manager
         };
 
         // Create Genesis block
-        blockchain.new_block(100, Some("1".to_owned()));
+        blockchain.new_block(100, Some(Blockchain::ORIGIN_HASH));
         return blockchain;
     }
 
@@ -71,30 +66,29 @@ impl Blockchain {
             1,
         );
 
-        return self.new_block(proof, None);
+        self.new_block(proof, None)
     }
 
-    fn new_block(&mut self, proof: u64, previous_hash: Option<String>) -> Block {
-        let previous_hash = previous_hash.unwrap_or_else(|| Blockchain::hash(self.last_block()));
+    fn new_block(&mut self, proof: u64, previous_hash: Option<&str>) -> Block {
+        let hash = previous_hash.map(|s| s.into()).unwrap_or_else(|| Blockchain::hash(self.last_block()));
         let block = Block {
             index: (self.chain.len() as u32) + 1,
             timestamp: Utc::now().timestamp(),
             transactions: self.pending_transactions.clone(),
             proof,
-            previous_hash,
+            previous_hash: hash
         };
 
         // Clear transactions included in new block and push to chain
         self.pending_transactions.clear();
         self.chain.push(block.clone());
 
-        return block;
+        block
     }
 
     pub fn new_transaction(&mut self, sender: String, recipient: String, amount: u64) -> u32 {
-        let l_block = self.last_block();
-        l_block.append_transaction(Transaction::new(sender, recipient, amount));
-        return l_block.index + 1;
+        self.pending_transactions.push(Transaction::new(sender, recipient, amount));
+        self.chain.len() as u32
     }
 
     pub fn resolve_conflicts(&mut self) -> bool {
@@ -134,7 +128,6 @@ impl Blockchain {
         return sha.result_str().ends_with("0000");
     }
 
-    // TODO : Consider changing signature to &static str
     fn hash(block: &Block) -> String {
         let ser_block = serialize(block, Infinite).unwrap();
 
@@ -156,10 +149,11 @@ impl Blockchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::nodemanager::Node;
 
     #[test]
     fn genesis_blockchain() {
-        let blockchain = Blockchain::new();
+        let blockchain = Blockchain::new(NODE_MANAGER);
 
         assert_eq!(blockchain.chain.len() as u32, 1);
         assert_eq!(blockchain.pending_transactions.len() as u32, 0);
@@ -192,7 +186,7 @@ mod tests {
 
         let h1 = Blockchain::hash(&block);
 
-        block.append_transaction(Transaction::new("alice".to_owned(), "bob".to_owned(), 10));
+        block.transactions.push(Transaction::new("alice".to_owned(), "bob".to_owned(), 10));
 
         let h2 = Blockchain::hash(&block);
 
@@ -209,11 +203,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_new_transaction() {
+        let mut blockchain = Blockchain::new(NODE_MANAGER);
+        blockchain.new_transaction("alice".to_owned(), "bob".to_owned(), 10);
+
+        assert_eq!(blockchain.pending_transactions.len(), 1, "New transaction should be added to pending.")
+    }
+
+    #[test]
+    fn validate_new_block() {
+        let mut blockchain = Blockchain::new(NODE_MANAGER);
+        blockchain.new_transaction("alice".to_owned(), "bob".to_owned(), 10);
+        // Generate a block
+        let new_block = blockchain.new_block(100, Some(&"1".to_owned()));
+
+        assert_eq!(new_block.transactions.len(), 1, "New returned block should contain transaction.");
+        assert_eq!(blockchain.pending_transactions.len(), 0, "Blockchain should be empty after new block generation.")
+    }
+
+    #[test]
     fn validate_chain() {
         let node_uuid = "1";
 
         // Valid chain check
-        let mut blockchain = Blockchain::new();
+        let mut blockchain = Blockchain::new(NODE_MANAGER);
         blockchain.new_transaction("alice".to_owned(), "bob".to_owned(), 10);
         blockchain.mine(node_uuid);
         blockchain.new_transaction("alice".to_owned(), "bob".to_owned(), 15);

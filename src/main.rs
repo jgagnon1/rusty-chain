@@ -7,24 +7,28 @@ extern crate reqwest;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate log;
 
 extern crate bincode;
 extern crate crypto;
 extern crate chrono;
-
+extern crate pnet;
 extern crate uuid;
 
 use rocket::State;
 use rocket::response::status;
 use rocket_contrib::{Json, Value};
 use uuid::Uuid;
+use pnet::datalink::{self, NetworkInterface};
 
+use std::env;
 use std::sync::RwLock;
 
 mod core;
 
 use core::blockchain::{Block, Blockchain, Chain, Transaction};
-use core::nodemanager::Node;
+use core::nodemanager::{Node, P2PNodeManager};
 
 struct Application {
     node_identifier: String,
@@ -34,18 +38,31 @@ struct Application {
 fn main() {
     let node_id = Uuid::new_v4().hyphenated().to_string();
 
+    let interface_name = env::args().nth(1).unwrap();
+    let local_ip = iface_ip(&interface_name);
+
+    let local = Node::new(format!("{}:{}", local_ip.unwrap(), 8000));
+
+    let node_manager = P2PNodeManager::new(local);
+
     let app = Application {
         node_identifier: node_id,
-        blockchain: RwLock::new(Blockchain::new()),
+        blockchain: RwLock::new(Blockchain::new(node_manager)),
     };
 
     rocket::ignite()
         .mount(
             "/",
-            routes![chain, node_info, node_consensus, node_register, mine, new_transaction],
+            routes![chain, nodes, node_info, node_consensus, node_register, mine, new_transaction],
         )
         .manage(app)
         .launch();
+}
+
+#[get("/nodes", format = "application/json")]
+fn nodes(state: State<Application>) -> Json<Vec<Node>> {
+    let nodes = state.blockchain.read().unwrap().node_manager.get_nodes();
+    Json(nodes)
 }
 
 #[get("/node/info", format = "application/json")]
@@ -58,7 +75,7 @@ fn node_info(state: State<Application>) -> Json<Value> {
 #[post("/node/register", format = "application/json", data = "<node>")]
 fn node_register(state: State<Application>, node: Json<Node>) -> status::Created<Json<Value>> {
     let n_node = node.into_inner();
-    let idx = state.blockchain.write().unwrap().node_manager.add_node(n_node);
+    let idx = state.blockchain.write().unwrap().node_manager.add_node(n_node).unwrap();
     status::Created(
         format!("/node/{}", idx),
         Some(Json(json!({
@@ -120,4 +137,20 @@ fn chain(state: State<Application>) -> Json<Chain> {
     // FIXME : Clone should not be needed here.
     let chain = state.blockchain.read().unwrap().chain.clone();
     Json(chain)
+}
+
+fn iface_ip(interface_name: &str) -> Option<String> {
+    let interface_names_match =
+        |iface: &NetworkInterface| iface.name == interface_name;
+
+    // Find the network interface with the provided name
+    let interfaces = datalink::interfaces();
+    let interface = interfaces.into_iter()
+        .filter(interface_names_match)
+        .next()
+        .unwrap();
+
+    let local_ip = interface.ips.iter()
+        .find(|ip| ip.is_ipv4());
+    local_ip.map(|ip| format!("{}", ip.ip()))
 }
